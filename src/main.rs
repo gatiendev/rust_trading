@@ -1,99 +1,120 @@
-use chrono::{DateTime, Utc};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
+mod binance_client;
+mod data_storage;
+mod kline;
+mod live_stream;
 
-/// Convert milliseconds since UNIX epoch to a human‑readable UTC string.
-fn format_time(ms: u64) -> String {
-    // chrono expects nanoseconds, so multiply by 1,000,000
-    let seconds = (ms / 1000) as i64;
-    let nanos = ((ms % 1000) * 1_000_000) as u32;
-    DateTime::<Utc>::from_timestamp(seconds, nanos)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string())
-        .unwrap_or_else(|| "Invalid timestamp".to_string())
-}
+use anyhow::Result;
+use chrono::{Duration, Utc};
+use std::path::Path;
+
+const HISTORICAL_COUNT: usize = 50_000;
+const CACHE_FILE: &str = "data/m15_latest_50000.parquet";
+const SYMBOL: &str = "BTCUSDT";
+const INTERVAL: &str = "15m";
+const LATEST_TIME_BEFORE_CACHE_REFRESH: i64 = 24;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Read command-line argument to choose stream type
+async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let stream_type = args.get(1).map(|s| s.as_str()).unwrap_or("trade");
 
-    // Build the WebSocket URL based on the chosen stream
-    let stream_name = match stream_type {
-        "trade" => "btcusdt@trade",
-        "m5" => "btcusdt@kline_5m",
-        "m15" => "btcusdt@kline_15m",
-        _ => {
-            eprintln!("Unknown stream type. Use 'trade', 'm5', or 'm15'.");
-            std::process::exit(1);
+    match args.get(1).map(String::as_str) {
+        Some("fetch-historical") => {
+            // Manual fetch mode: requires interval, start date, end date, output file
+            if args.len() < 5 {
+                eprintln!("Usage: fetch-historical <interval> <start YYYY-MM-DD> <end YYYY-MM-DD> <output.parquet>");
+                std::process::exit(1);
+            }
+            let interval = &args[2];
+            let start_str = &args[3];
+            let end_str = &args[4];
+            let output = &args[5];
+
+            let start = chrono::NaiveDate::parse_from_str(start_str, "%Y-%m-%d")?
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis();
+            let end = chrono::NaiveDate::parse_from_str(end_str, "%Y-%m-%d")?
+                .and_hms_opt(23, 59, 59)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis();
+
+            println!(
+                "Fetching {} {} data from {} to {}",
+                SYMBOL, interval, start_str, end_str
+            );
+            let klines = binance_client::fetch_klines_range(SYMBOL, interval, start, end).await?;
+            println!("Fetched {} klines", klines.len());
+
+            let mut df = data_storage::klines_to_dataframe(&klines)?;
+            data_storage::save_dataframe_parquet(&mut df, output)?;
+            data_storage::save_raw_dataframe(&mut df)?;
+
+            println!("Saved to {}", output);
         }
-    };
-    let url_str = format!("wss://stream.binance.com:9443/ws/{}", stream_name);
-    let url = Url::parse(&url_str)?;
+        _ => {
+            // Default / live mode: load latest 50k M15 candles, then start live stream
+            let historical = load_or_fetch_historical().await?;
+            // let feature_state = compute_initial_features(&historical); // consume if possible
+            // drop(historical); // free memory
 
-    println!("Connecting to Binance WebSocket: {}", url);
-    let (ws_stream, _) = connect_async(url).await?;
-    println!("Connected! Streaming '{}'", stream_name);
-
-    let (mut write, mut read) = ws_stream.split();
-
-    // Process incoming messages
-    while let Some(message) = read.next().await {
-        match message? {
-            Message::Text(text) => {
-                // Parse JSON
-                let data: Value = serde_json::from_str(&text)?;
-
-                // Handle different stream types
-                match stream_type {
-                    "trade" => {
-                        if let (Some(price), Some(qty), Some(time)) =
-                            (data["p"].as_str(), data["q"].as_str(), data["T"].as_u64())
-                        {
-                            let time_str = format_time(time);
-                            println!(
-                                "Trade | Time: {} | Price: {} | Qty: {}",
-                                time_str, price, qty
-                            );
-                        }
-                    }
-                    "m5" | "m15" => {
-                        // Kline data is inside the "k" object
-                        if let Some(kline) = data["k"].as_object() {
-                            if let (
-                                Some(open),
-                                Some(high),
-                                Some(low),
-                                Some(close),
-                                Some(volume),
-                                Some(close_time),
-                            ) = (
-                                kline["o"].as_str(),
-                                kline["h"].as_str(),
-                                kline["l"].as_str(),
-                                kline["c"].as_str(),
-                                kline["v"].as_str(),
-                                kline["T"].as_u64(), // close time of the kline
-                            ) {
-                                let time_str = format_time(close_time);
-                                println!(
-                                    "Kline | CloseTime: {} | Open: {} | High: {} | Low: {} | Close: {} | Volume: {}",
-                                    time_str, open, high, low, close, volume
-                                );
-                            }
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            Message::Ping(payload) => {
-                write.send(Message::Pong(payload)).await?;
-            }
-            _ => {}
+            // Pass the stream type (if provided) and historical data to live stream
+            let stream_type = args.get(1).map(String::as_str); // e.g., "m15" or "trade"
+            live_stream::run(stream_type, historical).await?;
         }
     }
 
     Ok(())
+}
+
+/// Load cached historical data if it exists and is fresh; otherwise fetch from Binance.
+async fn load_or_fetch_historical() -> Result<Vec<kline::Kline>> {
+    // Ensure data directory exists
+    if let Some(parent) = Path::new(CACHE_FILE).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Check if cache file exists and is recent (e.g., less than 1 hour old)
+    let should_fetch = if Path::new(CACHE_FILE).exists() {
+        let metadata = std::fs::metadata(CACHE_FILE)?;
+        let modified = metadata.modified()?;
+        let age = Utc::now().signed_duration_since(chrono::DateTime::<Utc>::from(modified));
+        age > Duration::hours(LATEST_TIME_BEFORE_CACHE_REFRESH) // older than 1 hour -> refresh
+    } else {
+        true
+    };
+
+    if should_fetch {
+        println!(
+            "Fetching latest {} M15 candles from Binance...",
+            HISTORICAL_COUNT
+        );
+        let klines =
+            binance_client::fetch_latest_klines(SYMBOL, INTERVAL, HISTORICAL_COUNT).await?;
+        println!("Fetched {} klines. Saving to cache...", klines.len());
+        let mut df = data_storage::klines_to_dataframe(&klines)?;
+        data_storage::save_dataframe_parquet(&mut df, CACHE_FILE)?;
+        data_storage::save_raw_dataframe(&mut df)?;
+        Ok(klines)
+    } else {
+        println!("Loading cached historical data from {}", CACHE_FILE);
+        let klines = data_storage::load_klines_from_parquet(CACHE_FILE)?;
+
+        let mut df = match data_storage::klines_to_dataframe(&klines) {
+            Ok(df) => df,
+            Err(e) => {
+                eprintln!("ERROR in klines_to_dataframe: {}", e);
+                // Return the original klines vector and skip CSV saving
+                return Ok(klines);
+            }
+        };
+
+        // Now safely attempt CSV write
+        if let Err(e) = data_storage::save_raw_dataframe(&mut df) {
+            eprintln!("Warning: failed to save CSV: {}", e);
+        }
+
+        Ok(klines)
+    }
 }

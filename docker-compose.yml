@@ -1,27 +1,24 @@
 version: '3.8'
 
 services:
-  binance-streamer:
+  binance-streamer-dev:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: binance-streamer:latest
-    container_name: binance-streamer
-    command: ["${STREAM_TYPE:-trade}"] 
+      dockerfile: Dockerfile.dev
+    container_name: binance-streamer-dev
+    working_dir: /app
     dns:
     - "8.8.8.8"
-    # Restart unless manually stopped (useful for production)
-    restart: unless-stopped
-    # Override the default command (which is "trade") by uncommenting and modifying below
-    # command: ["m5"]
-    # If you later add API keys or other configuration, pass them as environment variables
+    volumes:
+      - .:/app                    # Mount source code for live editing
+      - /app/target                # Keep target folder inside container (avoids permission issues)
     environment:
-      - TZ=UTC   # optional: set timezone for logs
-    # No ports needed – this is a console application
-    # For logging, you can view with `docker logs -f binance-streamer`
+      - TZ=UTC
+      # - STREAM_TYPE=${STREAM_TYPE:-trade}
+      - STREAM_TYPE=m5   # Pass stream type via env var
+      - RUST_BACKTRACE=1
+    # Use shell to evaluate STREAM_TYPE inside container
 
-# Start with trade (default)
-# docker-compose up 
-
-# Start with m5
-# STREAM_TYPE=m5 docker-compose up 
+    #command: sh -c "env | grep STREAM_TYPE && sleep infinity"
+    #command: cargo watch -x run -- ${STREAM_TYPE} --ignore data/* --ignore *.csv
+    command: sh -c "echo 'STREAM_TYPE =' $$STREAM_TYPE && cargo watch -x 'run -- $$STREAM_TYPE' --ignore 'data/*' --ignore '*.csv'"

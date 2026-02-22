@@ -1,93 +1,57 @@
-We'll update the `README.md` to include the new features:
-
-- **Command-line arguments** for stream type (`trade`, `m5`, `m15`).
-- **Human-readable timestamps** using `chrono`.
-- **Docker containerization** with `Dockerfile` and `docker-compose.yml`.
-
-The updated README will replace the old one. Below is the full new content.
-
----
-
-```markdown
 # Binance Trading Bot with Rust & ONNX
 
 This project is a real‑time cryptocurrency trading bot that streams data from Binance, performs feature engineering, runs an ONNX machine learning model, and executes trades based on the model's predictions. The core is written in Rust for maximum performance and low latency.
 
-## 🏗️ System Architecture
+## ✨ New Features
 
-The bot is structured as a single Rust application with several logical components:
+- **Historical data preload** – On startup, the bot automatically fetches the latest 50,000 M15 candlesticks (or loads from a Parquet cache) to provide context for feature engineering.
+- **Modular codebase** – Separated into logical modules (`binance_client`, `data_storage`, `kline`, `live_stream`) for maintainability and testability.
+- **Efficient storage** – Historical data is stored in **Parquet** (columnar format) for fast reloading. CSV export is also available.
+- **Development‑friendly** – Uses `cargo watch` inside Docker for live code reloading, with proper environment variable handling and file‑watching exclusions.
+
+## 🏗️ System Architecture
 
 ```mermaid
 flowchart TD
     A[Binance WebSocket\nMarket Data] --> B[Data Ingest\n& Normalization]
-    B --> C[Feature Engineering\n& Windowing]
-    C --> D[ONNX Runtime\nML Inference]
-    D --> E[Trading Decision\n& Risk Management]
-    E --> F[Binance REST API\nOrder Execution]
-    F --> G[Portfolio State\n& Order Management]
-    G --> C
+    A2[Binance REST API\nHistorical Klines] --> B2[Historical Data Fetcher]
+    B2 --> C2[Parquet Cache]
+    C2 --> D[Feature Engineering\n& Windowing]
+    B --> D
+    D --> E[ONNX Runtime\nML Inference]
+    E --> F[Trading Decision\n& Risk Management]
+    F --> G[Binance REST API\nOrder Execution]
+    G --> H[Portfolio State\n& Order Management]
+    H --> D
 ```
 
-### 1. Data Ingestion (Current Implementation)
+## 📁 Project Structure
 
-- **Purpose:** Connect to Binance WebSocket streams (trades, candlesticks) and receive real‑time market data.
-- **Implementation:** `tokio-tungstenite` for async WebSocket handling. Raw JSON messages are parsed and converted into strongly‑typed Rust structs.
-- **Current features:**
-  - Supports `trade`, `m5` (5‑minute klines), and `m15` (15‑minute klines) streams via command‑line argument.
-  - Displays human‑readable timestamps using the `chrono` crate.
-
-### 2. Feature Engineering (Planned)
-
-- **Purpose:** Transform raw market data into the input features required by the ML model. This is a critical step that must be extremely fast and deterministic.
-- **Implementation options:**
-  - **Custom Rust code:** Use `ndarray` or `nalgebra` to compute technical indicators (SMA, RSI, order book imbalance) with full control over memory and performance.
-  - **Polars DataFrame:** For more complex aggregations, the [Polars](https://github.com/pola-rs/polars) crate can be integrated to handle windowed operations efficiently.
-- **Key considerations:**
-  - All feature computation must be **lock‑free** and avoid allocations on the hot path.
-  - The output is a fixed‑size vector (or tensor) that matches the ONNX model's input shape.
-
-### 3. ML Inference with ONNX Runtime (Planned)
-
-- **Purpose:** Run the trained model to generate trading signals.
-- **Implementation:** [ort](https://crates.io/crates/ort) – a safe Rust wrapper for ONNX Runtime.
-- **Workflow:**
-  1. Load the model (`model.onnx`) once at startup.
-  2. For every new feature vector, call `model.run()`.
-  3. The output is a tensor containing e.g., a probability score or a class label (BUY/SELL/HOLD).
-- **Performance:** Inference is performed synchronously within the main event loop – no network calls, no garbage collection pauses.
-
-### 4. Trading Decision & Risk Management (Planned)
-
-- **Purpose:** Decide whether to act on the ML signal, and if so, how.
-- **Logic:**
-  - Convert raw model output into an order type and size (e.g., if score > 0.8, buy 0.001 BTC).
-  - Apply risk checks:
-    - Maximum position size
-    - Daily loss limits
-    - Cooldown periods after trades
-    - Market sanity checks (spread, volatility)
-- **Implementation:** Custom Rust state machine, possibly using a lightweight actor model.
-
-### 5. Order Execution (Planned)
-
-- **Purpose:** Send authenticated orders to Binance.
-- **Implementation:** Use a library like [ccxt‑rust](https://crates.io/crates/ccxt-rust) or [crypto‑botters](https://crates.io/crates/crypto-botters) to interact with Binance REST API.
-- **Handling:**
-  - Manage API key/secret securely (environment variables).
-  - Implement retry logic with exponential backoff.
-  - Track order status and update portfolio state.
-
-### 6. Portfolio & Order Management (Planned)
-
-- **Purpose:** Maintain an up‑to‑date view of balances, open orders, and positions.
-- **Implementation:** In‑memory state that is updated on every trade and periodically synced with Binance.
+```
+binance_trading_bot/
+├── Cargo.toml
+├── Cargo.lock
+├── .gitignore
+├── .env.example
+├── Dockerfile              # Production image
+├── Dockerfile.dev          # Development image with cargo-watch
+├── docker-compose.yml      # Development compose with live reload
+├── docker-compose.prod.yml # Production compose
+├── README.md
+└── src/
+    ├── main.rs             # CLI entry point
+    ├── binance_client.rs   # REST API client for historical klines
+    ├── data_storage.rs     # Parquet/CSV I/O and DataFrame conversions
+    ├── kline.rs            # Kline struct and deserialization
+    └── live_stream.rs      # WebSocket streaming logic
+```
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 
-- Rust (edition 2021) – if you want to build locally.
-- Docker (optional) – for containerized execution.
+- Rust (edition 2021) – for local builds.
+- Docker & Docker Compose – for containerized development/production.
 
 ### Installation (Local)
 
@@ -106,14 +70,11 @@ flowchart TD
 
 ### Usage
 
-Run the streamer with a chosen stream type:
+#### Live Streaming
 
 ```bash
 # Live trade data (default)
 cargo run
-
-# or explicitly
-cargo run trade
 
 # 5‑minute candlesticks
 cargo run m5
@@ -122,74 +83,80 @@ cargo run m5
 cargo run m15
 ```
 
-Example output:
+On startup, the bot loads (or fetches) the latest 50,000 M15 candles to warm up features.
 
-```
-Trade | Time: 2025-03-21 14:32:17.456 UTC | Price: 65432.10 | Qty: 0.001
-Kline | CloseTime: 2025-03-21 14:35:00.000 UTC | Open: 65400.00 | High: 65450.00 | Low: 65380.00 | Close: 65430.00 | Volume: 12.5
-```
-
-### Docker
-
-You can also run the application inside a Docker container. This ensures a consistent environment and simplifies deployment.
-
-#### Build the image
+#### Fetch Historical Data Manually
 
 ```bash
+cargo run fetch-historical 15m 2025-01-01 2025-01-31 data/jan2025.parquet
+```
+
+This saves the data as Parquet and also creates a CSV file in the same directory.
+
+### Docker Development (with live reload)
+
+We provide a `docker-compose.dev.yml` for development that uses `cargo watch` to automatically rebuild and restart on code changes.
+
+```bash
+# Start the dev container (default stream: m5)
+docker-compose -f docker-compose.dev.yml up
+
+# Override stream type (e.g., trade)
+STREAM_TYPE=trade docker-compose -f docker-compose.dev.yml up
+```
+
+- The container mounts your local source code, so changes are reflected immediately.
+- Generated CSV/Parquet files are written to the container’s filesystem; to access them on the host, mount a volume (e.g., `./data:/app/data`).
+- `cargo watch` is configured to ignore `data/` and `*.csv` to avoid infinite restart loops.
+
+### Docker Production
+
+```bash
+# Build the production image
 docker build -t binance-streamer .
-```
 
-#### Run the container
-
-```bash
-# Default trade stream
+# Run with default trade stream
 docker run --rm binance-streamer
 
-# 5‑minute candles
+# Run with 5m candles
 docker run --rm binance-streamer m5
-
-# 15‑minute candles
-docker run --rm binance-streamer m15
 ```
 
-#### Using docker-compose
+## 🧩 Modules Explained
 
-A `docker-compose.yml` file is provided for convenience:
+### `kline.rs`
 
-```yaml
-version: '3.8'
+Defines the `Kline` struct and custom deserializer for Binance’s array‑based kline format.
 
-services:
-  binance-streamer:
-    build: .
-    image: binance-streamer:latest
-    container_name: binance-streamer
-    restart: unless-stopped
-    # Uncomment to override the default command
-    # command: ["m5"]
-    environment:
-      - TZ=UTC
-```
+### `binance_client.rs`
 
-Start it with:
+Contains two public functions:
 
-```bash
-docker-compose up
-# or detached mode
-docker-compose up -d
-```
+- `fetch_klines_range` – fetches klines between two timestamps with automatic pagination.
+- `fetch_latest_klines` – fetches the most recent N candles for a given interval.
 
-Stop and remove:
+### `data_storage.rs`
 
-```bash
-docker-compose down
-```
+Handles conversion between `Vec<Kline>` and Polars `DataFrame`, and provides functions to save/load DataFrames as Parquet or CSV.
+
+### `live_stream.rs`
+
+Manages the WebSocket connection, parses incoming messages, and prints formatted data. It receives the historical `Vec<Kline>` as context (for future feature engineering).
+
+### `main.rs`
+
+Parses CLI arguments and orchestrates:
+
+- `fetch-historical` subcommand.
+- Default live mode: loads historical data (from cache or network) and starts the live stream.
 
 ## 🧪 Development Roadmap
 
 - [x] WebSocket streaming from Binance (trades, 5m, 15m) with readable timestamps
-- [x] Docker containerization
-- [ ] Add more streams (order book, klines for other intervals)
+- [x] Docker containerization (production & development)
+- [x] Historical data fetching and caching (Parquet)
+- [x] Modular code structure
+- [ ] Add more streams (order book, other intervals)
 - [ ] Implement feature engineering (technical indicators)
 - [ ] Integrate ONNX Runtime for inference
 - [ ] Build decision engine with risk management
@@ -197,22 +164,27 @@ docker-compose down
 - [ ] Live paper trading mode
 - [ ] Real‑money trading with safeguards
 
-## ⚠️ Risk Disclaimer
+## ⚙️ Environment Variables
 
-Trading cryptocurrencies carries significant risk. This software is for educational purposes only. Use at your own risk. Always test thoroughly on testnet before using real funds.
+- `STREAM_TYPE` – Sets the default stream for development (`trade`, `m5`, `m15`). Used in `docker-compose.dev.yml`.
+- `RUST_BACKTRACE=1` – Enables full backtraces on panics.
 
 ## 📚 Dependencies
 
 - `tokio` – async runtime
-- `tokio-tungstenite` – WebSocket client (with `rustls-tls` or `native-tls`)
+- `tokio-tungstenite` – WebSocket client
 - `serde_json` – JSON parsing
 - `chrono` – human‑readable timestamps
-- `url` – URL parsing
+- `reqwest` – REST API client
+- `polars` – DataFrame operations & Parquet/CSV I/O
+- `anyhow` – flexible error handling
 - `futures-util` – stream utilities
-- `ort` – ONNX Runtime bindings (future)
-- `polars` – DataFrame operations (optional)
-- `ccxt‑rust` – Exchange connectivity (future)
+- `url` – URL parsing
+- (Future) `ort` – ONNX Runtime bindings
+- (Future) `ccxt‑rust` – exchange connectivity
 
-```
+## ⚠️ Risk Disclaimer
 
-This README now reflects all the recent enhancements. Feel free to tweak any sections to better match your project's specifics.
+Trading cryptocurrencies carries significant risk. This software is for educational purposes only. Use at your own risk. Always test thoroughly on testnet before using real funds.
+
+---

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  binance-streamer-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: binance-streamer-dev
+    working_dir: /app
+    dns:
+    - "8.8.8.8"
+    volumes:
+      - .:/app                    # Mount source code for live editing
+      - /app/target                # Keep target folder inside container (avoids permission issues)
+    environment:
+      - TZ=UTC
+      - STREAM_TYPE=${STREAM_TYPE:-trade}   # Pass stream type via env var
+    # Use shell to evaluate STREAM_TYPE inside container
+    command: sh -c "cargo watch -x 'run -- $${STREAM_TYPE}'"

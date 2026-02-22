@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  binance-streamer-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: binance-streamer-dev
+    working_dir: /app
+    dns:
+    - "8.8.8.8"
+    volumes:
+      - .:/app                    # Mount source code for live editing
+      - /app/target                # Keep target folder inside container (avoids permission issues)
+    environment:
+      - TZ=UTC
+      # - STREAM_TYPE=${STREAM_TYPE:-trade}
+      - STREAM_TYPE=${STREAM_TYPE:-m5}   # Pass stream type via env var
+      - RUST_BACKTRACE=1
+    # Use shell to evaluate STREAM_TYPE inside container
+
+    command: sh -c "env | grep STREAM_TYPE && sleep infinity"
+    #command: cargo watch -x "run -- ${STREAM_TYPE}" --ignore data/* --ignore *.csv
+    #command: sh -c "echo 'STREAM_TYPE =' $STREAM_TYPE && cargo watch -x 'run -- $STREAM_TYPE' --ignore 'data/*' --ignore '*.csv'"
