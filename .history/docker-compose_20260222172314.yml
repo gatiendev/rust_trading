@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  binance-streamer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: binance-streamer:latest
+    container_name: binance-streamer
+    # Restart unless manually stopped (useful for production)
+    restart: unless-stopped
+    # Override the default command (which is "trade") by uncommenting and modifying below
+    # command: ["m5"]
+    # If you later add API keys or other configuration, pass them as environment variables
+    environment:
+      - TZ=UTC   # optional: set timezone for logs
+    # No ports needed – this is a console application
+    # For logging, you can view with `docker logs -f binance-streamer`

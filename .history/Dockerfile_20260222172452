@@ -1,0 +1,36 @@
+# ---- Builder Stage ----
+FROM rust:1.93 AS builder
+
+# Create a new empty project and copy over manifests
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+# Create a dummy src/main.rs to build dependencies (caching trick)
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
+
+# Now copy the actual source code and rebuild
+COPY src ./src
+# Touch the main.rs file to force a rebuild of the actual application
+RUN touch src/main.rs
+RUN cargo build --release
+
+# ---- Runtime Stage ----
+FROM debian:bookworm-slim
+
+# Install CA certificates for HTTPS (needed for TLS connections)
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user to run the app
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+# Copy the compiled binary from the builder stage
+COPY --from=builder /app/target/release/binance_streamer /app/binance_streamer
+
+# Switch to non-root user
+USER appuser
+
+# Default command (can be overridden)
+ENTRYPOINT ["/app/binance_streamer"]
+CMD ["trade"]
