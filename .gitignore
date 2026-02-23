@@ -9,6 +9,8 @@
 # Uncomment the next line only if this is a library:
 # Cargo.lock
 
+/data/
+
 # MSVC Windows builds of rustc generate these
 *.pdb
 
