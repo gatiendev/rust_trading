@@ -1,0 +1,304 @@
+# Learning Rust Through a Trading Bot
+
+This document explains core Rust concepts by examining a real‑world project: a Binance trading bot. The code is available in this repository. We'll walk through the most important Rust features—ownership, error handling, async, modules, and more—using concrete examples from the bot.
+
+## 1. Project Structure and Modules
+
+Rust projects are organised into **modules**. Each file (except `main.rs`) is a module. In our bot:
+
+```
+
+src/
+├── main.rs              # Entry point
+├── binance_client.rs    # REST API client (module `binance_client`)
+├── data_storage.rs      # Parquet/CSV I/O (module `data_storage`)
+├── kline.rs             # Kline struct and deserialisation (module `kline`)
+└── live_stream.rs       # WebSocket streaming (module `live_stream`)
+
+```
+
+In `main.rs` we declare these modules:
+
+```rust
+mod binance_client;
+mod data_storage;
+mod kline;
+mod live_stream;
+```
+
+This makes them available throughout the crate. Functions from a module are called with `module_name::function_name`, e.g. `binance_client::fetch_latest_klines(...)`.
+
+## 2. Defining Structs and Implementing Methods
+
+In `kline.rs` we define a `Kline` struct that holds candlestick data:
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Kline {
+    pub open_time: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub close_time: i64,
+}
+```
+
+- `#[derive(Debug, Clone)]` automatically implements two common traits: `Debug` (for printing with `{:?}`) and `Clone` (to duplicate the struct).
+- Fields are `pub` so they can be accessed from other modules.
+
+Rust doesn't have classes; instead we use `impl` blocks to attach methods:
+
+```rust
+impl Kline {
+    pub fn new(open_time: i64, open: f64, ...) -> Self {
+        Kline { open_time, open, ... }
+    }
+}
+```
+
+But in our code we usually create `Kline` instances via deserialisation (see section 4).
+
+## 3. Ownership and Borrowing
+
+Ownership is Rust’s most unique feature. Every value has a single **owner**; when the owner goes out of scope, the value is dropped.
+
+### 3.1 Moving Ownership
+
+In `binance_client.rs` we fetch batches of klines:
+
+```rust
+pub async fn fetch_klines_range(..., mut start_time: i64, ...) -> Result<Vec<Kline>> {
+    let mut all = Vec::new();
+    loop {
+        let klines: Vec<Kline> = response.json().await?;
+        // ... clone the last kline before moving `klines`
+        let last = klines.last().unwrap().clone();
+        let batch_len = klines.len();
+
+        all.extend(klines);          // ownership of `klines` moves into `all`
+
+        if batch_len < limit { break; }
+        start_time = last.close_time + 1;   // we can still use `last` because we cloned it
+    }
+    Ok(all)
+}
+```
+
+- `all.extend(klines)` **moves** the vector `klines` into `all`. After this line we cannot use `klines` anymore.
+- To preserve the last element for later, we clone it **before** moving: `let last = klines.last().unwrap().clone();`. Cloning creates an independent copy, so we can still use `last` afterwards.
+
+### 3.2 Borrowing with References
+
+Functions often need to read data without taking ownership. They **borrow** using references (`&T` for immutable, `&mut T` for mutable).
+
+In `data_storage.rs` we convert a slice of `Kline` into a DataFrame:
+
+```rust
+pub fn klines_to_dataframe(klines: &[Kline]) -> Result<DataFrame> {
+    let open_time: Vec<i64> = klines.iter().map(|k| k.open_time).collect();
+    // ...
+}
+```
+
+- `&[Kline]` is a **slice** – a borrowed view into a contiguous sequence. The function can read the klines but cannot modify or drop them.
+- `iter()` creates an iterator over borrowed items.
+
+Later we save the DataFrame to CSV, but we need to modify it (convert timestamps). So we take a mutable reference:
+
+```rust
+pub fn save_dataframe_csv(df: &mut DataFrame, path: &str) -> Result<()> {
+    // ... modify df (add string columns)
+    writer.finish(df)?;
+    Ok(())
+}
+```
+
+- `&mut DataFrame` allows mutation. The caller must pass `&mut df`.
+
+### 3.3 Lifetimes
+
+Rust ensures references are always valid. The compiler checks **lifetimes**. Usually they are inferred, but sometimes we need to annotate them. In our code, lifetimes are mostly implicit because the borrow checker can figure them out. However, when we return references from functions, we sometimes need to specify them. For example, if we had a function that returns a reference to a field inside a struct, we would write:
+
+```rust
+impl Kline {
+    pub fn open_time(&self) -> &i64 {
+        &self.open_time
+    }
+}
+```
+
+Here the lifetime of the returned reference is tied to `self` – the compiler infers it automatically.
+
+## 4. Error Handling with `Result` and `anyhow`
+
+Rust doesn't have exceptions; it uses the `Result<T, E>` type for recoverable errors. Many functions in our bot return `anyhow::Result<T>` – a convenient wrapper from the `anyhow` crate.
+
+```rust
+use anyhow::Result;
+
+pub async fn fetch_latest_klines(..., count: usize) -> Result<Vec<Kline>> {
+    // ...
+}
+```
+
+- `anyhow::Result<T>` is an alias for `Result<T, anyhow::Error>`. It can hold any error type.
+- We use the `?` operator to propagate errors: if a function returns `Err`, the `?` returns early with that error.
+
+Example from `main.rs`:
+
+```rust
+let klines = binance_client::fetch_latest_klines(SYMBOL, INTERVAL, HISTORICAL_COUNT).await?;
+```
+
+If `fetch_latest_klines` fails, the error is returned from the calling function (which also returns `Result`).
+
+We also handle errors gracefully with `if let Err(e) = ...` when we don't want to abort:
+
+```rust
+if let Err(e) = data_storage::save_dataframe_csv_default(&df) {
+    eprintln!("Warning: failed to save default CSV: {}", e);
+}
+```
+
+## 5. Traits and Derives
+
+Traits define shared behaviour. Many standard library behaviours are expressed as traits. We often **derive** them automatically:
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+pub struct Kline { ... }
+```
+
+- `Debug` allows printing with `{:?}`.
+- `Clone` allows explicit duplication with `.clone()`.
+- `Deserialize` (from `serde`) allows creating a `Kline` from JSON.
+
+We also implement custom deserialisation for the `Kline` because Binance returns arrays, not objects. This is done by implementing the `Deserialize` trait manually (see `kline.rs`). It's a more advanced use of traits but shows their power.
+
+## 6. Iterators and Closures
+
+Rust's iterators are lazy and highly optimised. We use them extensively.
+
+In `data_storage.rs` to convert a slice of `Kline` into vectors:
+
+```rust
+let open_time: Vec<i64> = klines.iter().map(|k| k.open_time).collect();
+```
+
+- `klines.iter()` creates an iterator over references to each element.
+- `.map(|k| k.open_time)` applies a **closure** to each element, extracting the `open_time` field.
+- `.collect()` builds a new `Vec` from the iterator.
+
+Another example from the CSV conversion:
+
+```rust
+let str_vals: Vec<String> = ca
+    .into_iter()
+    .map(|opt| opt.map_or(String::new(), |ms| timestamp_to_string(ms)))
+    .collect();
+```
+
+- `into_iter()` consumes the series and gives an iterator over `Option<i64>` (because Polars series may contain nulls).
+- `.map(|opt| ...)` transforms each optional value into a `String`.
+- `opt.map_or(String::new(), |ms| ...)` is a combinator: if `opt` is `None`, use the default `String::new()`; if `Some(ms)`, call `timestamp_to_string(ms)`.
+
+Closures are lightweight and can capture variables from their environment.
+
+## 7. Async Programming with Tokio
+
+The bot uses `tokio` for asynchronous I/O. Functions that perform network calls are marked `async`.
+
+```rust
+pub async fn fetch_klines_range(..., start_time: i64, end_time: i64) -> Result<Vec<Kline>> {
+    let client = Client::new();
+    // ...
+    let response = client.get(&url).send().await?;
+    let klines: Vec<Kline> = response.json().await?;
+    // ...
+}
+```
+
+- `.await` yields control back to the tokio runtime while waiting for the response, allowing other tasks to run.
+- The function returns a `Future` that resolves to a `Result`.
+
+In `main.rs`, we use `#[tokio::main]` to set up the async runtime:
+
+```rust
+#[tokio::main]
+async fn main() -> Result<()> {
+    // ...
+}
+```
+
+The WebSocket stream in `live_stream.rs` is also async:
+
+```rust
+let (ws_stream, _) = connect_async(url).await?;
+let (mut write, mut read) = ws_stream.split();
+while let Some(message) = read.next().await {
+    // ...
+}
+```
+
+`read.next().await` waits for the next message without blocking.
+
+## 8. Memory Safety and Zero-Cost Abstractions
+
+Rust guarantees memory safety at compile time. For example, you cannot have a dangling reference. Our code never manually frees memory; the compiler inserts `drop` calls automatically when values go out of scope.
+
+Zero-cost abstractions mean that high-level constructs like iterators and `async`/`await` compile down to efficient machine code, with no hidden overhead. The `fetch_klines_range` loop uses a simple `loop` and vector operations – it’s as fast as hand‑written C.
+
+## 9. Pattern Matching and Enums
+
+We use pattern matching in several places. For example, in `main.rs` we match on command-line arguments:
+
+```rust
+match args.get(1).map(String::as_str) {
+    Some("fetch-historical") => { ... }
+    _ => { ... }
+}
+```
+
+`Option` is an enum with variants `Some(T)` and `None`. We match on it to handle the presence or absence of an argument.
+
+In `live_stream.rs` we match on the parsed JSON to extract fields:
+
+```rust
+if let Some(kline) = data["k"].as_object() {
+    if let Some(is_closed) = kline["x"].as_bool() {
+        // ...
+    }
+}
+```
+
+`if let` is a concise way to match a single pattern.
+
+## 10. Testing and Documentation
+
+Rust has built-in testing. You can write tests in the same file with `#[cfg(test)]`. For example:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamp_to_string() {
+        let ts = 1614556800000; // 2021-03-01 00:00:00 UTC
+        let s = timestamp_to_string(ts);
+        assert_eq!(s, "2021-03-01 00:00:00.000 UTC");
+    }
+}
+```
+
+Run tests with `cargo test`. Documentation comments (`///`) generate HTML docs with `cargo doc`.
+
+## Conclusion
+
+Rust’s ownership model, expressive type system, and fearless concurrency make it ideal for high‑performance trading bots. By studying this codebase, you've seen how Rust enforces memory safety, handles errors elegantly, and provides zero‑cost abstractions. The patterns here—modules, structs, traits, async, and iterators—are applicable to many other domains.
+
+Now dive into the code, experiment, and enjoy writing safe, fast Rust!
+
+```

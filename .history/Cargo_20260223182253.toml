@@ -1,0 +1,25 @@
+[package]
+name = "binance_streamer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
+futures-util = "0.3"
+serde_json = "1"
+url = "2"
+chrono = "0.4"               # for human‑readable timestamps
+reqwest = { version = "0.12", features = ["json"] }   # for REST API calls
+polars = { version = "0.53", features = [
+    "lazy",
+    "parquet", 
+    "ewma",
+    "dynamic_group_by",
+    "asof_join",
+    "dtype-datetime",
+    "dtype-struct"
+] }
+anyhow = "1.0"        # for easier error handling (optional but convenient)
+serde = { version = "1.0", features = ["derive"] }
+memory-stats = "0.1"
